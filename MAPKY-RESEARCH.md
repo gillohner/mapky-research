@@ -85,33 +85,29 @@ pub struct OsmRef {
 
 #### MapkyAppPost — `/pub/mapky.app/posts/<id>` (TimestampId)
 
-Unified type for all user content about a place — reviews, questions, comments, replies. Mirrors `PubkyAppPost` (which has `PubkyAppPostKind`) but anchored to an OSM element. One flexible type covers everything, including Q&A (no separate Question/Answer models needed).
+Unified type for all user content about a place — reviews, questions, comments, replies. Anchored to an OSM element. No `kind` enum — the post's role is determined by its fields and tags:
+
+- `rating` present → indexer treats it as a review and aggregates scores
+- Tagged `"question"` (via `PubkyAppTag`) → indexer surfaces it in Q&A sections
+- Everything else → general post/comment
 
 ```rust
-pub enum MapkyAppPostKind {
-    Review,    // has rating — "4 stars, great pasta". Indexer aggregates ratings.
-    Question,  // asking about a place — "Is there parking nearby?". Indexer builds Q&A threads.
-    Comment,   // general comment or reply. Used with `parent` for answers to questions, replies to reviews.
-}
-
 pub struct MapkyAppPost {
     pub place: OsmRef,                    // OSM element this post is about
-    pub kind: MapkyAppPostKind,           // tells the indexer and UI how to handle this post
     pub content: Option<String>,          // text content (review text, question, comment, caption)
-    pub rating: Option<u8>,              // 1-10 (half-stars). Only meaningful for kind=Review.
+    pub rating: Option<u8>,              // 1-10 (half-stars). Presence = review.
     pub attachments: Option<Vec<String>>, // pubky:// file URIs (reuses PubkyAppFile — photos, videos, PDFs, audio)
     pub parent: Option<String>,          // pubky:// URI of parent MapkyAppPost (for replies, answers)
 }
 ```
 
-What this single type covers:
-- **Review**: `kind=Review` + `rating` + `content` — "4.5 stars, great pasta"
-- **Review with photos**: `kind=Review` + `rating` + `content` + `attachments`
-- **Question**: `kind=Question` + `content` — "Is there parking nearby?"
-- **Answer**: `kind=Comment` + `parent` pointing to a Question post — "Yes, there's a lot behind the building"
-- **Comment on a review**: `kind=Comment` + `parent` pointing to a Review post
-- **Photo/media post**: `kind=Comment` + `attachments` with optional `content` as caption
-- **Any nesting depth** via `parent` chains
+Use cases covered:
+- **Review**: `rating` + `content` — "4.5 stars, great pasta"
+- **Review with photos**: `rating` + `content` + `attachments`
+- **Question**: `content` + `PubkyAppTag{label: "question"}` — "Is there parking nearby?"
+- **Answer/reply**: `parent` pointing to another post — "Yes, there's a lot behind the building"
+- **Photo/media post**: `attachments` with optional `content` as caption
+- **Threaded discussion**: any nesting depth via `parent` chains
 
 **Tagging — posts and individual files**: `PubkyAppTag` targets any `pubky://` URI, so both posts and their individual attachments are taggable:
 - Tag a review: `PubkyAppTag{uri: "pubky://user/.../posts/ID", label: "helpful"}` — "helpful", "outdated", "spam"
@@ -351,7 +347,7 @@ pub struct MapkyAppRoute {
 | File/media storage | `PubkyAppFile` + `PubkyAppBlob` (unchanged) — attachments in MapkyAppPost reference these |
 | Tag label validation | `sanitize_tag_label()`, `validate_tag_label()` from `src/models/tag.rs` |
 | Post threading & Q&A | `MapkyAppPost.parent` mirrors `PubkyAppPost.parent` — answers are just comments on question posts |
-| Post kind | `MapkyAppPostKind` mirrors `PubkyAppPostKind` pattern for differentiating content types |
+| Post role via fields + tags | No `kind` enum — `rating` presence signals review, `PubkyAppTag` signals question, threading via `parent` |
 | OSM URL parsing | Extends `Location.osm_id()` pattern from `src/models/location.rs` |
 | Trait implementations | `Validatable`, `TimestampId`/`HashId`, `HasIdPath` from `src/traits.rs` |
 | Tagging posts + files | `PubkyAppTag` targets any URI — tag posts ("helpful", "spam") and individual attached files ("menu", "interior") for gallery categorization |
@@ -387,7 +383,7 @@ The mapky-indexer watches Pubky homeserver events for `mapky.app/` paths and mai
 ### Watcher pattern
 
 Subscribes to homeserver PUT/DEL events for `mapky.app/` paths:
-- `PUT mapky.app/posts/*` → parse post, dispatch by `kind`: Review → aggregate ratings; Question → index as Q&A thread; Comment → link to parent thread; Media → index in place gallery
+- `PUT mapky.app/posts/*` → parse post: if `rating` present → aggregate ratings; if has `parent` → link to parent thread; if has `attachments` → index in place gallery. Q&A threads resolved via `PubkyAppTag` with label "question"
 - `PUT mapky.app/location_tags/*` → increment tag count for place (by category if Option B)
 - `DEL mapky.app/location_tags/*` → decrement tag count
 - etc.
